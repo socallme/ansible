@@ -5,7 +5,7 @@
   become: yes
   vars:
     vip: 192.168.20.254
-    interface: eth0
+    interface: "{{ ansible_default_ipv4.interface }}"  # Auto-detects primary interface
     virtual_router_id: 51
     ssh_user: pihole-admin
     nodes:
