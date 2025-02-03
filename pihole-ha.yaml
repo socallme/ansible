@@ -1,0 +1,124 @@
+---
+# pihole-vrrp-automation.yml
+- name: Configure Pi-hole VRRP HA with Automatic DHCP Sync
+  hosts: pihole_cluster
+  become: yes
+  vars:
+    vip: 192.168.1.100
+    interface: eth0
+    virtual_router_id: 51
+    ssh_user: pihole-admin
+    pihole_config_path: /etc/pihole
+    keepalived_config: /etc/keepalived/keepalived.conf
+    cron_script: /usr/local/bin/pihole-sync.sh
+    nodes:
+      master:
+        ip: 192.168.1.1
+        priority: 150
+      backup:
+        ip: 192.168.1.2
+        priority: 100
+
+  tasks:
+    # Remove existing configurations
+    - name: Clean existing cron jobs
+      cron:
+        name: "Pi-hole sync"
+        state: absent
+
+    - name: Remove existing Keepalived config
+      file:
+        path: "{{ keepalived_config }}"
+        state: absent
+      notify: restart keepalived
+
+    - name: Stop and disable Keepalived service
+      service:
+        name: keepalived
+        state: stopped
+        enabled: no
+
+    # Base setup
+    - name: Install required packages
+      apt:
+        name: ["keepalived", "rsync", "sshpass"]
+        state: latest
+        update_cache: yes
+
+    - name: Create sync user
+      user:
+        name: "{{ ssh_user }}"
+        groups: pihole
+        shell: /bin/bash
+        system: yes
+        append: yes
+
+    - name: Configure SSH keys
+      openssh_keypair:
+        path: /home/{{ ssh_user }}/.ssh/id_ed25519
+        type: ed25519
+        owner: "{{ ssh_user }}"
+        group: "{{ ssh_user }}"
+        force: no
+
+    - name: Authorize SSH keys between nodes
+      authorized_key:
+        user: "{{ ssh_user }}"
+        state: present
+        key: "{{ item }}"
+      loop: "{{ hostvars[item].ssh_host_keys.stdout }}"
+      when: inventory_hostname != item
+      delegate_to: "{{ item }}"
+      loop_control:
+        loop_var: item
+
+    # Keepalived configuration
+    - name: Configure Keepalived
+      template:
+        src: keepalived.conf.j2
+        dest: "{{ keepalived_config }}"
+        mode: 0644
+      notify: restart keepalived
+
+    - name: Enable and start Keepalived
+      service:
+        name: keepalived
+        state: started
+        enabled: yes
+
+    # DHCP Sync configuration
+    - name: Deploy sync script
+      template:
+        src: pihole-sync.sh.j2
+        dest: "{{ cron_script }}"
+        mode: 0755
+
+    - name: Configure automatic sync cron
+      cron:
+        name: "Pi-hole DHCP Sync"
+        job: "{{ cron_script }}"
+        user: root
+        minute: "*/5"
+        hour: "*"
+        state: present
+
+    # Firewall configuration
+    - name: Allow VRRP protocol
+      ufw:
+        rule: allow
+        proto: vrrp
+        direction: in
+
+    - name: Allow SSH between nodes
+      ufw:
+        rule: allow
+        proto: tcp
+        port: 22
+        src: "{{ nodes.master.ip }}"
+        direction: in
+
+  handlers:
+    - name: restart keepalived
+      service:
+        name: keepalived
+        state: restarted
