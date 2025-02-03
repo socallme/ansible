@@ -1,0 +1,97 @@
+---
+- name: Deploy K3s on master nodes with HA
+  hosts: masters
+  become: yes
+  serial: 1  # Process nodes sequentially for HA setup
+  vars:
+    rancher_hostname: "rancher.{{ ansible_default_ipv4.address }}.nip.io"
+    bootstrap_password: "SecurePassword123!"
+
+  tasks:
+    - name: Install primary K3s master (with embedded etcd)
+      when: is_primary|default(false)
+      ansible.builtin.shell: |
+        curl -sfL https://get.k3s.io | sh -s - server \
+          --cluster-init \
+          --tls-san {{ rancher_hostname }}
+      register: k3s_install
+      changed_when: "'already installed' not in k3s_install.stdout"
+
+    - name: Get node token from primary master
+      when: is_primary|default(false)
+      ansible.builtin.slurp:
+        src: /var/lib/rancher/k3s/server/node-token
+      register: k3s_token_file
+
+    - name: Set cluster token fact
+      when: is_primary|default(false)
+      ansible.builtin.set_fact:
+        k3s_token: "{{ k3s_token_file.content | b64decode | replace('\n', '') }}"
+
+    - name: Join secondary master nodes
+      when: not is_primary|default(true)
+      ansible.builtin.shell: |
+        curl -sfL https://get.k3s.io | sh -s - server \
+          --server https://{{ hostvars[groups['masters'][0]].ansible_host }}:6443 \
+          --token {{ hostvars[groups['masters'][0]].k3s_token }} \
+          --tls-san {{ rancher_hostname }}
+      register: k3s_secondary_install
+      changed_when: "'already installed' not in k3s_secondary_install.stdout"
+
+- name: Join workers and deploy Rancher
+  hosts: workers
+  become: yes
+  tasks:
+    - name: Set cluster connection facts
+      ansible.builtin.set_fact:
+        k3s_token: "{{ hostvars[groups['masters'][0]].k3s_token }}"
+        primary_master_ip: "{{ hostvars[groups['masters'][0]].ansible_host }}"
+
+    - name: Join worker nodes to cluster
+      ansible.builtin.shell: |
+        curl -sfL https://get.k3s.io | sh -s - agent \
+          --server https://{{ primary_master_ip }}:6443 \
+          --token {{ k3s_token }}
+      register: join_cluster
+      changed_when: "'already installed' not in join_cluster.stdout"
+
+  post_tasks:
+    - name: Install Helm on primary master
+      become: yes
+      delegate_to: "{{ groups['masters'][0] }}"
+      ansible.builtin.apt:
+        name: helm
+        state: present
+
+    - name: Add required Helm repositories
+      become: yes
+      delegate_to: "{{ groups['masters'][0] }}"
+      ansible.builtin.shell: |
+        helm repo add jetstack https://charts.jetstack.io
+        helm repo add rancher-latest https://releases.rancher.com/server-charts/latest
+        helm repo update
+
+    - name: Install cert-manager
+      become: yes
+      delegate_to: "{{ groups['masters'][0] }}"
+      ansible.builtin.shell: |
+        helm upgrade --install cert-manager jetstack/cert-manager \
+          --namespace cert-manager \
+          --create-namespace \
+          --version v1.11.0 \
+          --set installCRDs=true
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+
+    - name: Install Rancher
+      become: yes
+      delegate_to: "{{ groups['masters'][0] }}"
+      ansible.builtin.shell: |
+        helm upgrade --install rancher rancher-latest/rancher \
+          --namespace cattle-system \
+          --create-namespace \
+          --set hostname={{ rancher_hostname }} \
+          --set bootstrapPassword={{ bootstrap_password }} \
+          --set replicas=2
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
