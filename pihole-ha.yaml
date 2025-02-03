@@ -1,5 +1,5 @@
 ---
-# All-in-one Pi-hole VRRP Playbook
+# All-in-one Pi-hole HA with DHCP Management
 - name: Configure Pi-hole HA with Embedded Templates
   hosts: pihole_cluster
   become: yes
@@ -38,7 +38,7 @@
         state: latest
         update_cache: yes
 
-    # Configure Keepalived directly in playbook
+    # Configure Keepalived with VRRP notification
     - name: Deploy Keepalived configuration
       copy:
         dest: /etc/keepalived/keepalived.conf
@@ -62,7 +62,38 @@
           }
       notify: restart keepalived
 
-    # Deploy sync script directly in playbook
+    # VRRP notification script for DHCP control
+    - name: Deploy VRRP notify script
+      copy:
+        dest: /usr/local/bin/vrrp-notify.sh
+        mode: 0755
+        content: |
+          #!/bin/bash
+          TYPE=$1
+          NAME=$2
+          STATE=$3
+
+          case $STATE in
+              "MASTER")
+                  systemctl start pihole-FTL
+                  ;;
+              "BACKUP"|"FAULT")
+                  systemctl stop pihole-FTL
+                  ;;
+              *)
+                  ;;
+          esac
+
+    # DHCP configuration with VRRP IP as DNS
+    - name: Configure DHCP DNS option
+      copy:
+        dest: /etc/pihole/dnsmasq.d/02-pihole-dhcp.conf
+        content: "dhcp-option=6,{{ vip }}"
+        owner: root
+        group: root
+        mode: 0644
+
+    # Enhanced sync script with VIP-based triggering
     - name: Create sync script
       copy:
         dest: /usr/local/bin/pihole-sync.sh
@@ -70,21 +101,24 @@
         content: |
           #!/bin/bash
           NODES=({{ nodes.master.ip }} {{ nodes.backup.ip }})
+          CURRENT_NODE_IP={{ nodes[inventory_hostname].ip }}
           CONFIG_FILES=(
             "/etc/pihole/setupVars.conf"
-            "/etc/pihole/dhcp.leases" 
+            "/etc/pihole/dhcp.leases"
+            "/etc/pihole/dnsmasq.d/02-pihole-dhcp.conf"
             "/etc/pihole/dnsmasq.d/04-pihole-static-dhcp.conf"
           )
 
           for node in "${NODES[@]}"; do
-            if [ "$node" != "$(hostname -i)" ] && ip a show dev {{ interface }} | grep -q {{ vip }}; then
+            if [ "$node" != "$CURRENT_NODE_IP" ] && ip a show dev {{ interface }} | grep -q {{ vip }}; then
               rsync -e "ssh -o StrictHostKeyChecking=no" -az --delete \
                 "${CONFIG_FILES[@]}" \
                 {{ ssh_user }}@$node:/etc/pihole/
+              ssh {{ ssh_user }}@$node "systemctl restart pihole-FTL"
             fi
           done
 
-    # Configure cron job
+    # Configure cron job for config sync
     - name: Set up sync cron
       cron:
         name: "Pi-hole Config Sync"
@@ -92,7 +126,7 @@
         user: root
         minute: "*/5"
 
-    # Configure SSH access
+    # SSH setup for synchronization
     - name: Setup SSH user
       user:
         name: "{{ ssh_user }}"
@@ -103,14 +137,20 @@
       authorized_key:
         user: "{{ ssh_user }}"
         state: present
-        key: "{{ lookup('file', '~/.ssh/id_rsa.pub') }}"  # Use your existing pubkey
+        key: "{{ lookup('file', '~/.ssh/id_rsa.pub') }}"
 
-    # Enable services
+    # Final service management
     - name: Start Keepalived
       service:
         name: keepalived
         state: started
         enabled: yes
+
+    - name: Ensure initial DHCP service state
+      systemd:
+        name: pihole-FTL
+        enabled: yes
+        state: stopped
 
   handlers:
     - name: restart keepalived
