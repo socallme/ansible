@@ -1,0 +1,176 @@
+---
+# All-in-one Pi-hole HA with DHCP Management (Fixed Version)
+- name: Configure Pi-hole HA with Embedded Templates
+  hosts: pihole_cluster
+  become: yes
+  vars:
+    vip: 192.168.20.254
+    interface: "{{ ansible_default_ipv4.interface }}"
+    virtual_router_id: 51
+    ssh_user: pihole-admin
+    nodes:
+      master:
+        ip: 192.168.20.193
+        priority: 150
+      backup:
+        ip: 192.168.20.191
+        priority: 100
+
+  tasks:
+    # Cleanup existing config (Fixed with proper permissions)
+    - name: Remove previous configurations
+      block:
+        - name: Remove sync cron
+          cron:
+            name: "Pi-hole sync"
+            state: absent
+
+        - name: Remove Keepalived config
+          file:
+            path: /etc/keepalived/keepalived.conf
+            state: absent
+          when: ansible_user == 'root'  # Add conditional if needed
+
+        - name: Stop Keepalived
+          service:
+            name: keepalived
+            state: stopped
+            enabled: no
+
+      become: true
+
+    # Install required packages
+    - name: Install dependencies
+      apt:
+        name: ["keepalived", "rsync", "sshpass"]
+        state: latest
+        update_cache: yes
+
+    # Configure Keepalived
+    - name: Deploy Keepalived configuration
+      copy:
+        dest: /etc/keepalived/keepalived.conf
+        mode: 0644
+        content: |
+          vrrp_instance VI_1 {
+              state {% if inventory_hostname == 'master' %}MASTER{% else %}BACKUP{% endif %}
+              interface {{ interface }}
+              virtual_router_id {{ virtual_router_id }}
+              priority {{ nodes[inventory_hostname].priority }}
+              advert_int 1
+              preempt
+              authentication {
+                  auth_type PASS
+                  auth_pass secret
+              }
+              virtual_ipaddress {
+                  {{ vip }}/24
+              }
+              notify "/usr/local/bin/vrrp-notify.sh"
+          }
+      notify: restart keepalived
+
+    # VRRP notification script
+    - name: Deploy VRRP notify script
+      copy:
+        dest: /usr/local/bin/vrrp-notify.sh
+        mode: 0755
+        content: |
+          #!/bin/bash
+          TYPE=$1
+          NAME=$2
+          STATE=$3
+
+          case $STATE in
+              "MASTER")
+                  systemctl start pihole-FTL
+                  ;;
+              "BACKUP"|"FAULT")
+                  systemctl stop pihole-FTL
+                  ;;
+              *)
+                  ;;
+          esac
+
+    # DHCP configuration
+    - name: Configure DHCP DNS option
+      copy:
+        dest: /etc/pihole/dnsmasq.d/02-pihole-dhcp.conf
+        content: "dhcp-option=6,{{ vip }}"
+        owner: root
+        group: root
+        mode: 0644
+
+    # Enhanced sync script
+    - name: Create sync script
+      copy:
+        dest: /usr/local/bin/pihole-sync.sh
+        mode: 0755
+        content: |
+          #!/bin/bash
+          NODES=({{ nodes.master.ip }} {{ nodes.backup.ip }})
+          CURRENT_NODE_IP={{ nodes[inventory_hostname].ip }}
+          CONFIG_FILES=(
+            "/etc/pihole/setupVars.conf"
+            "/etc/pihole/dhcp.leases"
+            "/etc/pihole/dnsmasq.d/02-pihole-dhcp.conf"
+            "/etc/pihole/dnsmasq.d/04-pihole-static-dhcp.conf"
+          )
+
+          for node in "${NODES[@]}"; do
+            if [ "$node" != "$CURRENT_NODE_IP" ] && ip a show dev {{ interface }} | grep -q {{ vip }}; then
+              rsync -e "ssh -o StrictHostKeyChecking=no -i /home/{{ ssh_user }}/.ssh/id_rsa" -az --delete \
+                "${CONFIG_FILES[@]}" \
+                {{ ssh_user }}@$node:/etc/pihole/
+              ssh -i /home/{{ ssh_user }}/.ssh/id_rsa {{ ssh_user }}@$node "sudo systemctl restart pihole-FTL"
+            fi
+          done
+
+    # Configure cron job
+    - name: Set up sync cron
+      cron:
+        name: "Pi-hole Config Sync"
+        job: "/usr/local/bin/pihole-sync.sh"
+        user: root
+        minute: "*/5"
+
+    # SSH setup (Fixed with proper key management)
+    - name: Setup SSH user
+      user:
+        name: "{{ ssh_user }}"
+        groups: sudo
+        shell: /bin/bash
+        generate_ssh_key: yes
+        ssh_key_type: ed25519
+
+    - name: Deploy SSH key
+      authorized_key:
+        user: "{{ ssh_user }}"
+        state: present
+        key: "{{ lookup('file', '~/.ssh/id_rsa.pub') }}"
+        manage_dir: yes
+
+    - name: Configure sudo access
+      copy:
+        dest: /etc/sudoers.d/{{ ssh_user }}
+        content: "{{ ssh_user }} ALL=(ALL) NOPASSWD: ALL"
+        validate: 'visudo -cf %s'
+
+    # Service management
+    - name: Start Keepalived
+      service:
+        name: keepalived
+        state: started
+        enabled: yes
+
+    - name: Ensure initial DHCP service state
+      systemd:
+        name: pihole-FTL
+        enabled: yes
+        state: stopped
+
+  handlers:
+    - name: restart keepalived
+      service:
+        name: keepalived
+        state: restarted
