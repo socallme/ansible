@@ -1,5 +1,5 @@
 ---
-- name: Deploy HA K3s cluster with self-signed TLS
+- name: Prepare all nodes
   hosts: all
   become: yes
   vars:
@@ -7,12 +7,18 @@
     primary_master: "{{ groups['masters'][0] }}"
     rancher_hostname: "rancher.{{ hostvars[primary_master].ansible_host }}.nip.io"
     bootstrap_password: "SecurePassword123!"
-  
+
   tasks:
-    - name: Update apt cache
+    - name: Update apt cache with retries
       ansible.builtin.apt:
         update_cache: yes
         cache_valid_time: 3600
+      register: apt_update
+      until: apt_update is succeeded
+      retries: 5
+      delay: 10
+      become: yes
+      become_method: sudo
 
 - name: Configure master nodes
   hosts: masters
