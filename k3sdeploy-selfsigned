@@ -4,7 +4,7 @@
   become: yes
   serial: 1
   vars:
-    rancher_hostname: "rancher.{{ hostvars[groups['masters'][0]].ansible_host }}.nip.io"
+    rancher_hostname: "rancher.{{ hostvars[groups['masters'][0]].ansible_host }}.lan"
     bootstrap_password: "SecurePassword123!"
 
   tasks:
