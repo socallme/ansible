@@ -1,79 +1,121 @@
 ---
-- name: Deploy K3s on master nodes with HA (self-signed)
+- name: Deploy HA K3s cluster with self-signed TLS
+  hosts: all
+  become: yes
+  vars:
+    cluster_token: "{{ hostvars[groups['masters'][0]].k3s_token | default('') }}"
+    primary_master: "{{ groups['masters'][0] }}"
+    rancher_hostname: "rancher.{{ hostvars[primary_master].ansible_host }}.nip.io"
+    bootstrap_password: "SecurePassword123!"
+  
+  tasks:
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+- name: Configure master nodes
   hosts: masters
   become: yes
   serial: 1
   vars:
-    rancher_hostname: "rancher.{{ hostvars[groups['masters'][0]].ansible_host }}.lan"
-    bootstrap_password: "SecurePassword123!"
+    is_primary: "{{ 'true' if inventory_hostname == primary_master else 'false' }}"
 
   tasks:
     - name: Install primary K3s master (with embedded etcd)
-      when: is_primary|default(false)
+      when: is_primary
       ansible.builtin.shell: |
         curl -sfL https://get.k3s.io | sh -s - server \
           --cluster-init \
+          --disable traefik \
           --tls-san {{ rancher_hostname }} \
           --tls-san {{ ansible_host }}
+      async: 300
+      poll: 0
       register: k3s_install
       changed_when: "'already installed' not in k3s_install.stdout"
 
-    - name: Get node token from primary master
-      when: is_primary|default(false)
+    - name: Wait for cluster initialization
+      when: is_primary
+      ansible.builtin.wait_for:
+        path: /var/lib/rancher/k3s/server/node-token
+        timeout: 180
+
+    - name: Retrieve cluster token from primary
+      when: is_primary
       ansible.builtin.slurp:
         src: /var/lib/rancher/k3s/server/node-token
-      register: k3s_token_file
+        mode: '0400'
+      register: token_file
+      become: true
 
     - name: Set cluster token fact
-      when: is_primary|default(false)
+      when: is_primary
       ansible.builtin.set_fact:
-        k3s_token: "{{ k3s_token_file.content | b64decode | replace('\n', '') }}"
+        k3s_token: "{{ token_file.content | b64decode | trim }}"
 
-    - name: Join secondary master nodes
-      when: not is_primary|default(true)
+    - name: Join secondary masters to cluster
+      when: not is_primary
       ansible.builtin.shell: |
         curl -sfL https://get.k3s.io | sh -s - server \
-          --server https://{{ hostvars[groups['masters'][0]].ansible_host }}:6443 \
-          --token {{ hostvars[groups['masters'][0]].k3s_token }} \
+          --server https://{{ hostvars[primary_master].ansible_host }}:6443 \
+          --token {{ cluster_token }} \
           --tls-san {{ rancher_hostname }} \
           --tls-san {{ ansible_host }}
-      register: k3s_secondary_install
-      changed_when: "'already installed' not in k3s_secondary_install.stdout"
+      register: join_result
+      changed_when: "'already installed' not in join_result.stdout"
 
-- name: Join workers and deploy Rancher with self-signed TLS
+    - name: Verify K3s service
+      ansible.builtin.systemd:
+        name: k3s
+        state: started
+      register: service_status
+      until: service_status is succeeded
+      retries: 5
+      delay: 10
+
+- name: Join worker nodes
   hosts: workers
   become: yes
   tasks:
-    - name: Set cluster connection facts
-      ansible.builtin.set_fact:
-        k3s_token: "{{ hostvars[groups['masters'][0]].k3s_token }}"
-        primary_master_ip: "{{ hostvars[groups['masters'][0]].ansible_host }}"
-
-    - name: Join worker nodes to cluster
+    - name: Join worker to cluster
       ansible.builtin.shell: |
         curl -sfL https://get.k3s.io | sh -s - agent \
-          --server https://{{ primary_master_ip }}:6443 \
-          --token {{ k3s_token }}
-      register: join_cluster
-      changed_when: "'already installed' not in join_cluster.stdout"
+          --server https://{{ hostvars[primary_master].ansible_host }}:6443 \
+          --token {{ cluster_token }}
+      register: join_worker
+      changed_when: "'already installed' not in join_worker.stdout"
 
-  post_tasks:
+- name: Deploy Rancher with self-signed certs
+  hosts: "{{ primary_master }}"
+  become: yes
+  tasks:
+    - name: Install required packages
+      ansible.builtin.apt:
+        name: 
+          - helm
+          - openssl
+        state: present
+
+    - name: Configure kubeconfig access
+      ansible.builtin.file:
+        path: /etc/rancher/k3s/k3s.yaml
+        owner: root
+        group: root
+        mode: '0644'
+
     - name: Generate self-signed certificate
-      become: yes
-      delegate_to: "{{ groups['masters'][0] }}"
       ansible.builtin.shell: |
         mkdir -p /tmp/rancher-certs
-        openssl req -x509 -newkey rsa:4096 -sha256 -days 3650 -nodes \
+        openssl req -x509 -newkey rsa:4096 -sha256 -days 365 -nodes \
           -keyout /tmp/rancher-certs/tls.key \
           -out /tmp/rancher-certs/tls.crt \
           -subj "/CN={{ rancher_hostname }}" \
-          -addext "subjectAltName=DNS:{{ rancher_hostname}},IP:{{ primary_master_ip }}"
+          -addext "subjectAltName=DNS:{{ rancher_hostname }},IP:{{ ansible_host }}"
       args:
         creates: /tmp/rancher-certs/tls.crt
 
-    - name: Create TLS secret for Rancher
-      become: yes
-      delegate_to: "{{ groups['masters'][0] }}"
+    - name: Create TLS secret
       ansible.builtin.shell: |
         kubectl create namespace cattle-system --dry-run=client -o yaml | kubectl apply -f -
         kubectl -n cattle-system create secret tls tls-rancher-ingress \
@@ -83,23 +125,12 @@
       environment:
         KUBECONFIG: /etc/rancher/k3s/k3s.yaml
 
-    - name: Install Helm
-      become: yes
-      delegate_to: "{{ groups['masters'][0] }}"
-      ansible.builtin.apt:
-        name: helm
-        state: present
-
     - name: Add Rancher Helm repository
-      become: yes
-      delegate_to: "{{ groups['masters'][0] }}"
       ansible.builtin.shell: |
         helm repo add rancher-latest https://releases.rancher.com/server-charts/latest
         helm repo update
 
-    - name: Install Rancher with self-signed certificate
-      become: yes
-      delegate_to: "{{ groups['masters'][0] }}"
+    - name: Deploy Rancher
       ansible.builtin.shell: |
         helm upgrade --install rancher rancher-latest/rancher \
           --namespace cattle-system \
@@ -110,3 +141,25 @@
           --set replicaCount=2
       environment:
         KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      register: helm_deploy
+      retries: 3
+      delay: 30
+      until: helm_deploy.rc == 0
+
+    - name: Verify Rancher pods
+      ansible.builtin.shell: |
+        kubectl -n cattle-system rollout status deployment/rancher
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      register: rancher_status
+      until: rancher_status.rc == 0
+      retries: 12
+      delay: 15
+
+    - name: Display access information
+      ansible.builtin.debug:
+        msg: |
+          Rancher successfully deployed!
+          URL: https://{{ rancher_hostname }}
+          Bootstrap Password: {{ bootstrap_password }}
+          Add to hosts file: {{ hostvars[primary_master].ansible_host }} {{ rancher_hostname }}
