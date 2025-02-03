@@ -1,0 +1,24 @@
+#!/bin/bash
+# Auto-generated sync script
+
+NODES=({{ nodes.master.ip }} {{ nodes.backup.ip }})
+VIP="{{ vip }}"
+CONFIG_FILES=(
+  "{{ pihole_config_path }}/setupVars.conf"
+  "{{ pihole_config_path }}/dhcp.leases"
+  "{{ pihole_config_path }}/dnsmasq.d/04-pihole-static-dhcp.conf"
+)
+
+sync_config() {
+  for node in "${NODES[@]}"; do
+    if [ "$node" != "$(hostname -i)" ]; then
+      rsync -e "ssh -i /home/{{ ssh_user }}/.ssh/id_ed25519" -az --delete \
+        "${CONFIG_FILES[@]}" \
+        {{ ssh_user }}@$node:{{ pihole_config_path }}/
+    fi
+  done
+}
+
+if ip a show dev {{ interface }} | grep -q $VIP; then
+  sync_config
+fi
