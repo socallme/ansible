@@ -5,7 +5,7 @@
   vars:
     cluster_token: "{{ hostvars[groups['masters'][0]].k3s_token | default('') }}"
     primary_master: "{{ groups['masters'][0] }}"
-    rancher_hostname: "rancher.{{ hostvars[primary_master].ansible_host }}.nip.io"
+    rancher_hostname: "rancher.{{ hostvars[primary_master].ansible_host }}.lan"
     bootstrap_password: "SecurePassword123!"
 
   tasks:
