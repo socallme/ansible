@@ -3,10 +3,11 @@
   hosts: pihole_cluster
   become: yes
   vars:
+    ansible_remote_tmp: /tmp/.ansible
     vip: 192.168.20.254
     interface: "{{ ansible_default_ipv4.interface }}"
     virtual_router_id: 51
-    ssh_user: pihole-admin
+    ssh_user: adminuser
     nodes:
       master:
         ip: 192.168.20.193
