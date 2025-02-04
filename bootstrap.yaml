@@ -1,0 +1,13 @@
+- name: Bootstrap new host
+  hosts: all
+  become: yes
+  tasks:
+    - name: Add Ansible user
+      user:
+        name: ansible
+        groups: sudo
+        append: yes
+    - name: Deploy SSH key
+      authorized_key:
+        user: ansible
+        key: "{{ lookup('file', '/path/to/public_key') }}"
