@@ -1,0 +1,16 @@
+vrrp_instance VI_1 {
+    state {{ 'MASTER' if inventory_hostname == 'master' else 'BACKUP' }}
+    interface {{ interface }}
+    virtual_router_id {{ virtual_router_id }}
+    priority {{ nodes[inventory_hostname].priority }}
+    advert_int 1
+    preempt
+    authentication {
+        auth_type PASS
+        auth_pass secret
+    }
+    virtual_ipaddress {
+        {{ vip }}/24
+    }
+    notify "/usr/local/bin/vrrp-notify.sh"
+}
