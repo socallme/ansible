@@ -1,5 +1,4 @@
 ---
-# All-in-one Pi-hole HA with DHCP Management (Fixed Version)
 - name: Configure Pi-hole HA with Embedded Templates
   hosts: pihole_cluster
   become: yes
@@ -17,27 +16,24 @@
         priority: 100
 
   tasks:
-    # Cleanup existing config (Fixed with proper permissions)
+    # Cleanup existing config
     - name: Remove previous configurations
       block:
         - name: Remove sync cron
           cron:
-            name: "Pi-hole sync"
+            name: "Pi-hole Config Sync"  # Fixed name consistency
             state: absent
 
         - name: Remove Keepalived config
           file:
             path: /etc/keepalived/keepalived.conf
             state: absent
-          when: ansible_user == 'root'  # Add conditional if needed
 
         - name: Stop Keepalived
           service:
             name: keepalived
             state: stopped
             enabled: no
-
-      become: true
 
     # Install required packages
     - name: Install dependencies
@@ -48,26 +44,10 @@
 
     # Configure Keepalived
     - name: Deploy Keepalived configuration
-      copy:
+      template:
+        src: keepalived.conf.j2  # Better to use template file
         dest: /etc/keepalived/keepalived.conf
         mode: 0644
-        content: |
-          vrrp_instance VI_1 {
-              state {% if inventory_hostname == 'master' %}MASTER{% else %}BACKUP{% endif %}
-              interface {{ interface }}
-              virtual_router_id {{ virtual_router_id }}
-              priority {{ nodes[inventory_hostname].priority }}
-              advert_int 1
-              preempt
-              authentication {
-                  auth_type PASS
-                  auth_pass secret
-              }
-              virtual_ipaddress {
-                  {{ vip }}/24
-              }
-              notify "/usr/local/bin/vrrp-notify.sh"
-          }
       notify: restart keepalived
 
     # VRRP notification script
@@ -97,8 +77,6 @@
       copy:
         dest: /etc/pihole/dnsmasq.d/02-pihole-dhcp.conf
         content: "dhcp-option=6,{{ vip }}"
-        owner: root
-        group: root
         mode: 0644
 
     # Enhanced sync script
@@ -119,10 +97,10 @@
 
           for node in "${NODES[@]}"; do
             if [ "$node" != "$CURRENT_NODE_IP" ] && ip a show dev {{ interface }} | grep -q {{ vip }}; then
-              rsync -e "ssh -o StrictHostKeyChecking=no -i /home/{{ ssh_user }}/.ssh/id_rsa" -az --delete \
+              rsync -e "ssh -o StrictHostKeyChecking=no -i /home/{{ ssh_user }}/.ssh/id_ed25519" -az --delete \
                 "${CONFIG_FILES[@]}" \
                 {{ ssh_user }}@$node:/etc/pihole/
-              ssh -i /home/{{ ssh_user }}/.ssh/id_rsa {{ ssh_user }}@$node "sudo systemctl restart pihole-FTL"
+              ssh -i /home/{{ ssh_user }}/.ssh/id_ed25519 {{ ssh_user }}@$node "sudo systemctl restart pihole-FTL"
             fi
           done
 
@@ -131,10 +109,10 @@
       cron:
         name: "Pi-hole Config Sync"
         job: "/usr/local/bin/pihole-sync.sh"
-        user: root
+        user: "{{ ssh_user }}"  # Run as dedicated user
         minute: "*/5"
 
-    # SSH setup (Fixed with proper key management)
+    # SSH setup improvements
     - name: Setup SSH user
       user:
         name: "{{ ssh_user }}"
@@ -142,18 +120,21 @@
         shell: /bin/bash
         generate_ssh_key: yes
         ssh_key_type: ed25519
+        ssh_key_file: ".ssh/id_ed25519"  # Explicit key path
 
     - name: Deploy SSH key
       authorized_key:
         user: "{{ ssh_user }}"
         state: present
-        key: "{{ lookup('file', '~/.ssh/id_rsa.pub') }}"
+        key: "{{ lookup('file', '/home/{{ ssh_user }}/.ssh/id_ed25519.pub') }}"
         manage_dir: yes
 
     - name: Configure sudo access
       copy:
         dest: /etc/sudoers.d/{{ ssh_user }}
-        content: "{{ ssh_user }} ALL=(ALL) NOPASSWD: ALL"
+        content: |
+          # Limited sudo for pihole sync
+          {{ ssh_user }} ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart pihole-FTL
         validate: 'visudo -cf %s'
 
     # Service management
@@ -162,12 +143,6 @@
         name: keepalived
         state: started
         enabled: yes
-
-    - name: Ensure initial DHCP service state
-      systemd:
-        name: pihole-FTL
-        enabled: yes
-        state: stopped
 
   handlers:
     - name: restart keepalived
