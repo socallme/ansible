@@ -1,0 +1,255 @@
+---
+- name: Configure Pi-hole HA with Embedded Templates
+  hosts: pihole_cluster
+  become: yes
+  vars:
+    ansible_remote_tmp: /tmp/.ansible
+    vip: 192.168.20.177
+    interface: "{{ ansible_default_ipv4.interface }}"
+    virtual_router_id: 51
+    ssh_user: adminuser
+    pihole_password: "changeme123"  # Change this to your desired password
+    nodes:
+      master:
+        ip: 192.168.20.201
+        priority: 150
+      backup:
+        ip: 192.168.20.202
+        priority: 100
+
+  pre_tasks:
+    - name: Update package cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Install basic requirements
+      apt:
+        name: ["curl", "software-properties-common"]
+        state: present
+
+  tasks:
+    # Pi-hole Installation
+    - name: Create Pi-hole setup vars
+      copy:
+        dest: /etc/pihole/setupVars.conf
+        content: |
+          PIHOLE_INTERFACE={{ interface }}
+          IPV4_ADDRESS={{ nodes[inventory_hostname].ip }}/24
+          IPV6_ADDRESS=
+          QUERY_LOGGING=true
+          INSTALL_WEB_SERVER=true
+          INSTALL_WEB_INTERFACE=true
+          LIGHTTPD_ENABLED=true
+          CACHE_SIZE=10000
+          DNS_FQDN_REQUIRED=true
+          DNS_BOGUS_PRIV=true
+          DNSMASQ_LISTENING=single
+          WEBPASSWORD="{{ pihole_password | hash('sha256') }}"
+          BLOCKING_ENABLED=true
+          PIHOLE_DNS_1=8.8.8.8
+          PIHOLE_DNS_2=8.8.4.4
+        mode: 0644
+        create: yes
+      register: setupvars
+
+    - name: Download Pi-hole installer
+      get_url:
+        url: https://install.pi-hole.net
+        dest: /tmp/install.sh
+        mode: 0755
+
+    - name: Install Pi-hole
+      command: bash /tmp/install.sh --unattended
+      args:
+        creates: /usr/local/bin/pihole
+      when: setupvars.changed
+
+    # Cleanup existing config
+    - name: Remove previous configurations
+      block:
+        - name: Remove sync cron
+          cron:
+            name: "Pi-hole Config Sync"
+            state: absent
+
+        - name: Remove Keepalived config
+          file:
+            path: /etc/keepalived/keepalived.conf
+            state: absent
+
+        - name: Stop Keepalived
+          service:
+            name: keepalived
+            state: stopped
+            enabled: no
+
+    # Install required packages
+    - name: Install dependencies
+      apt:
+        name: ["keepalived", "rsync", "sshpass"]
+        state: latest
+        update_cache: yes
+
+    # Configure Keepalived with embedded template
+    - name: Deploy Keepalived configuration
+      copy:
+        dest: /etc/keepalived/keepalived.conf
+        content: |
+          # Keepalived configuration for Pi-hole HA
+          global_defs {
+              router_id pihole_ha
+              script_user root
+              enable_script_security
+          }
+
+          vrrp_script check_pihole {
+              script "pidof pihole-FTL"
+              interval 2
+              weight 2
+              fall 2
+              rise 2
+          }
+
+          vrrp_instance PIHOLE_HA {
+              state {% if inventory_hostname == 'master' %}MASTER{% else %}BACKUP{% endif %}
+
+              interface {{ interface }}
+              virtual_router_id {{ virtual_router_id }}
+              priority {{ nodes[inventory_hostname].priority }}
+              advert_int 1
+
+              authentication {
+                  auth_type PASS
+                  auth_pass pihole_ha_auth
+              }
+
+              unicast_src_ip {{ nodes[inventory_hostname].ip }}
+              unicast_peer {
+              {% for host, data in nodes.items() %}
+              {% if data.ip != nodes[inventory_hostname].ip %}
+                  {{ data.ip }}
+              {% endif %}
+              {% endfor %}
+              }
+
+              virtual_ipaddress {
+                  {{ vip }}/24 dev {{ interface }}
+              }
+
+              track_script {
+                  check_pihole
+              }
+
+              notify /usr/local/bin/vrrp-notify.sh
+          }
+        mode: 0644
+      notify: restart keepalived
+
+    # VRRP notification script
+    - name: Deploy VRRP notify script
+      copy:
+        dest: /usr/local/bin/vrrp-notify.sh
+        mode: 0755
+        content: |
+          #!/bin/bash
+          TYPE=$1
+          NAME=$2
+          STATE=$3
+
+          case $STATE in
+              "MASTER")
+                  systemctl start pihole-FTL
+                  ;;
+              "BACKUP"|"FAULT")
+                  systemctl stop pihole-FTL
+                  ;;
+              *)
+                  ;;
+          esac
+
+    # DHCP configuration
+    - name: Configure DHCP DNS option
+      copy:
+        dest: /etc/pihole/dnsmasq.d/02-pihole-dhcp.conf
+        content: "dhcp-option=6,{{ vip }}"
+        mode: 0644
+
+    # Enhanced sync script
+    - name: Create sync script
+      copy:
+        dest: /usr/local/bin/pihole-sync.sh
+        mode: 0755
+        content: |
+          #!/bin/bash
+          NODES=({{ nodes.master.ip }} {{ nodes.backup.ip }})
+          CURRENT_NODE_IP={{ nodes[inventory_hostname].ip }}
+          CONFIG_FILES=(
+            "/etc/pihole/setupVars.conf"
+            "/etc/pihole/custom.list"
+            "/etc/pihole/dhcp.leases"
+            "/etc/pihole/pihole-FTL.conf"
+            "/etc/pihole/dns-servers.conf"
+            "/etc/pihole/adlists.list"
+            "/etc/pihole/dnsmasq.d/02-pihole-dhcp.conf"
+            "/etc/pihole/dnsmasq.d/04-pihole-static-dhcp.conf"
+          )
+
+          for node in "${NODES[@]}"; do
+            if [ "$node" != "$CURRENT_NODE_IP" ] && ip a show dev {{ interface }} | grep -q {{ vip }}; then
+              rsync -e "ssh -o StrictHostKeyChecking=no -i /home/{{ ssh_user }}/.ssh/id_ed25519" -az --delete \
+                "${CONFIG_FILES[@]}" \
+                {{ ssh_user }}@$node:/etc/pihole/
+              ssh -i /home/{{ ssh_user }}/.ssh/id_ed25519 {{ ssh_user }}@$node "sudo systemctl restart pihole-FTL"
+            fi
+          done
+
+    # Configure cron job
+    - name: Set up sync cron
+      cron:
+        name: "Pi-hole Config Sync"
+        job: "/usr/local/bin/pihole-sync.sh"
+        user: "{{ ssh_user }}"
+        minute: "*/5"
+
+    # SSH setup improvements
+    - name: Setup SSH user
+      user:
+        name: "{{ ssh_user }}"
+        groups: sudo
+        shell: /bin/bash
+        generate_ssh_key: yes
+        ssh_key_type: ed25519
+        ssh_key_file: ".ssh/id_ed25519"
+
+    - name: Deploy SSH key
+      authorized_key:
+        user: "{{ ssh_user }}"
+        state: present
+        key: "{{ lookup('file', '/home/{{ ssh_user }}/.ssh/id_ed25519.pub') }}"
+        manage_dir: yes
+
+    - name: Configure sudo access
+      copy:
+        dest: /etc/sudoers.d/{{ ssh_user }}
+        content: |
+          # Limited sudo for pihole sync
+          {{ ssh_user }} ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart pihole-FTL
+        validate: 'visudo -cf %s'
+
+    # Service management
+    - name: Start and enable services
+      service:
+        name: "{{ item }}"
+        state: started
+        enabled: yes
+      with_items:
+        - keepalived
+        - pihole-FTL
+        - lighttpd
+
+  handlers:
+    - name: restart keepalived
+      service:
+        name: keepalived
+        state: restarted
