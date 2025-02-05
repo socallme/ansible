@@ -1,6 +1,6 @@
 ---
 - name: VM Onboarding
-  hosts: new_vms
+  hosts: DNS
   become: yes
   vars:
     admin_user: admin
