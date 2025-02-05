@@ -78,16 +78,23 @@
             name: "Pi-hole Config Sync"
             state: absent
 
-        - name: Remove Keepalived config
+        - name: Remove Keepalived config if exists
           file:
             path: /etc/keepalived/keepalived.conf
             state: absent
+          
+        - name: Check if Keepalived service exists
+          stat:
+            path: /etc/init.d/keepalived
+          register: keepalived_service
 
-        - name: Stop Keepalived
+        - name: Stop Keepalived if installed
           service:
             name: keepalived
             state: stopped
             enabled: no
+          when: keepalived_service.stat.exists
+      ignore_errors: yes
 
     # Install required packages
     - name: Install dependencies
@@ -95,6 +102,10 @@
         name: ["keepalived", "rsync", "sshpass"]
         state: latest
         update_cache: yes
+      register: package_install
+      until: package_install is success
+      retries: 3
+      delay: 5
 
     # Configure Keepalived with embedded template
     - name: Deploy Keepalived configuration
@@ -242,7 +253,21 @@
           {{ ssh_user }} ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart pihole-FTL
         validate: 'visudo -cf %s'
 
+    # Ensure password is set correctly
+    - name: Set Pi-hole web interface password
+      command: "pihole -a -p {{ pihole_password }}"
+      changed_when: true
+      register: password_set
+      retries: 3
+      delay: 5
+      until: password_set is success
+      
     # Service management
+    - name: Ensure Keepalived is installed before starting
+      stat:
+        path: /etc/init.d/keepalived
+      register: keepalived_check
+
     - name: Start and enable services
       service:
         name: "{{ item }}"
@@ -252,6 +277,11 @@
         - keepalived
         - pihole-FTL
         - lighttpd
+      register: service_start
+      until: service_start is success
+      retries: 3
+      delay: 5
+      when: (item != 'keepalived' or keepalived_check.stat.exists)
 
   handlers:
     - name: restart keepalived
