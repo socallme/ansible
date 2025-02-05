@@ -4,7 +4,7 @@
   become: yes
   vars:
     ansible_remote_tmp: /tmp/.ansible
-    vip: 192.168.20.177
+    vip: 192.168.20.249
     interface: "{{ ansible_default_ipv4.interface }}"
     virtual_router_id: 51
     ssh_user: adminuser
@@ -30,6 +30,12 @@
 
   tasks:
     # Pi-hole Installation
+    - name: Ensure Pi-hole configuration directory exists
+      file:
+        path: /etc/pihole
+        state: directory
+        mode: '0755'
+
     - name: Create Pi-hole setup vars
       copy:
         dest: /etc/pihole/setupVars.conf
@@ -50,7 +56,6 @@
           PIHOLE_DNS_1=8.8.8.8
           PIHOLE_DNS_2=8.8.4.4
         mode: 0644
-        create: yes
       register: setupvars
 
     - name: Download Pi-hole installer
