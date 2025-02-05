@@ -1,8 +1,11 @@
 ---
 - name: VM Onboarding
-  hosts: DNS
+  hosts: new_vms
   become: yes
+  become_method: sudo
+  gather_facts: yes
   vars:
+    ansible_become_password: "{{ ansible_password }}"
     admin_user: admin
     admin_group: admin
     ssh_port: 22
@@ -18,42 +21,59 @@
       - net-tools
       - unzip
       - git
-    ntp_servers:
-      - 0.pool.ntp.org
-      - 1.pool.ntp.org
-      - 2.pool.ntp.org
+
+  pre_tasks:
+    - name: Ensure sudo access
+      raw: sudo -n true
+      register: sudo_check
+      failed_when: sudo_check.rc != 0
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Clear APT locks using sudo
+      command: "sudo rm -f /var/lib/apt/lists/lock /var/cache/apt/archives/lock /var/lib/dpkg/lock*"
+      args:
+        removes: /var/lib/apt/lists/lock
+      become: yes
+      ignore_errors: yes
+
+    - name: Reconfigure dpkg
+      command: sudo dpkg --configure -a
+      become: yes
+      ignore_errors: yes
 
   tasks:
     - name: Update package cache
       apt:
         update_cache: yes
         cache_valid_time: 3600
-      when: ansible_os_family == "Debian"
-
-    - name: Upgrade all packages
-      apt:
-        upgrade: yes
-      when: ansible_os_family == "Debian"
+      become: yes
+      register: apt_update
+      retries: 3
+      delay: 5
+      until: apt_update is success
 
     - name: Install essential packages
-      package:
+      apt:
         name: "{{ packages }}"
         state: present
+        update_cache: yes
+      become: yes
+      register: pkg_install
+      retries: 3
+      delay: 5
+      until: pkg_install is success
 
     - name: Set timezone
       timezone:
         name: UTC
-
-    - name: Configure NTP
-      template:
-        src: ntp.conf.j2
-        dest: /etc/ntp.conf
-      notify: restart ntp
+      become: yes
 
     - name: Create admin group
       group:
         name: "{{ admin_group }}"
         state: present
+      become: yes
 
     - name: Create admin user
       user:
@@ -63,6 +83,7 @@
         createhome: yes
         generate_ssh_key: yes
         ssh_key_bits: 4096
+      become: yes
 
     - name: Configure sudo access
       lineinfile:
@@ -71,43 +92,24 @@
         create: yes
         validate: 'visudo -cf %s'
         mode: '0440'
-
-    - name: Configure SSH
-      template:
-        src: sshd_config.j2
-        dest: /etc/ssh/sshd_config
-      notify: restart ssh
-
-    - name: Set up UFW
-      ufw:
-        state: enabled
-        policy: deny
+      become: yes
 
     - name: Configure UFW allowed ports
       ufw:
         rule: allow
         port: "{{ item }}"
       loop: "{{ allowed_ports }}"
-
-    - name: Enable automatic security updates
-      apt:
-        name: unattended-upgrades
-        state: present
-      when: ansible_os_family == "Debian"
-
-    - name: Configure automatic updates
-      template:
-        src: 20auto-upgrades.j2
-        dest: /etc/apt/apt.conf.d/20auto-upgrades
-      when: ansible_os_family == "Debian"
+      become: yes
 
   handlers:
     - name: restart ssh
       service:
         name: sshd
         state: restarted
+      become: yes
 
     - name: restart ntp
       service:
         name: ntp
         state: restarted
+      become: yes
