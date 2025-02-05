@@ -283,6 +283,17 @@
       delay: 5
       when: (item != 'keepalived' or keepalived_check.stat.exists)
 
+    # Final restart of Keepalived to ensure latest config is loaded
+    - name: Final restart of Keepalived
+      service:
+        name: keepalived
+        state: restarted
+      when: keepalived_check.stat.exists
+      register: keepalived_restart
+      until: keepalived_restart is success
+      retries: 3
+      delay: 5
+
   handlers:
     - name: restart keepalived
       service:
