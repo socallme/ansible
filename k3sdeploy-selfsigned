@@ -1,13 +1,20 @@
 ---
+# Playbook: Deploy K3s cluster with Rancher
+
+- name: Set global variables
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Set facts for cluster
+      set_fact:
+        primary_master: "{{ groups['masters'][0] }}"
+        rancher_hostname: "rancher.{{ hostvars[groups['masters'][0]].ansible_host }}.lan"
+        bootstrap_password: "SecurePassword123!"
+        cluster_token: "{{ hostvars[groups['masters'][0]].k3s_token | default('') }}"
+
 - name: Prepare all nodes
   hosts: all
   become: yes
-  vars:
-    primary_master: "{{ groups['masters'][0] }}"
-    cluster_token: "{{ hostvars[groups['masters'][0]].k3s_token | default('') }}"
-    rancher_hostname: "rancher.{{ hostvars[primary_master].ansible_host }}.lan"
-    bootstrap_password: "SecurePassword123!"
-
   tasks:
     - name: Update apt cache with retries
       ansible.builtin.apt:
@@ -17,17 +24,13 @@
       until: apt_update is succeeded
       retries: 5
       delay: 10
-      become: yes
-      become_method: sudo
 
 - name: Configure master nodes
   hosts: masters
   become: yes
   serial: 1
   vars:
-    # Remove primary_master from here since it's defined in the first play
-    is_primary: "{{ 'true' if inventory_hostname == primary_master else 'false' }}"
-
+    is_primary: "{{ inventory_hostname == groups['masters'][0] }}"
   tasks:
     - name: Install primary K3s master (with embedded etcd)
       when: is_primary
@@ -35,7 +38,7 @@
         curl -sfL https://get.k3s.io | sh -s - server \
           --cluster-init \
           --disable traefik \
-          --tls-san {{ rancher_hostname }} \
+          --tls-san {{ hostvars['localhost'].rancher_hostname }} \
           --tls-san {{ ansible_host }}
       async: 300
       poll: 0
@@ -54,20 +57,19 @@
         src: /var/lib/rancher/k3s/server/node-token
         mode: '0400'
       register: token_file
-      become: true
 
     - name: Set cluster token fact
       when: is_primary
-      ansible.builtin.set_fact:
+      set_fact:
         k3s_token: "{{ token_file.content | b64decode | trim }}"
 
     - name: Join secondary masters to cluster
       when: not is_primary
       ansible.builtin.shell: |
         curl -sfL https://get.k3s.io | sh -s - server \
-          --server https://{{ hostvars[primary_master].ansible_host }}:6443 \
-          --token {{ cluster_token }} \
-          --tls-san {{ rancher_hostname }} \
+          --server https://{{ hostvars[groups['masters'][0]].ansible_host }}:6443 \
+          --token {{ hostvars[groups['masters'][0]].k3s_token }} \
+          --tls-san {{ hostvars['localhost'].rancher_hostname }} \
           --tls-san {{ ansible_host }}
       register: join_result
       changed_when: "'already installed' not in join_result.stdout"
@@ -88,13 +90,13 @@
     - name: Join worker to cluster
       ansible.builtin.shell: |
         curl -sfL https://get.k3s.io | sh -s - agent \
-          --server https://{{ hostvars[primary_master].ansible_host }}:6443 \
-          --token {{ cluster_token }}
+          --server https://{{ hostvars[groups['masters'][0]].ansible_host }}:6443 \
+          --token {{ hostvars[groups['masters'][0]].k3s_token }}
       register: join_worker
       changed_when: "'already installed' not in join_worker.stdout"
 
 - name: Deploy Rancher with self-signed certs
-  hosts: "{{ primary_master }}"
+  hosts: "{{ groups['masters'][0] }}"
   become: yes
   tasks:
     - name: Install required packages
@@ -117,8 +119,8 @@
         openssl req -x509 -newkey rsa:4096 -sha256 -days 365 -nodes \
           -keyout /tmp/rancher-certs/tls.key \
           -out /tmp/rancher-certs/tls.crt \
-          -subj "/CN={{ rancher_hostname }}" \
-          -addext "subjectAltName=DNS:{{ rancher_hostname }},IP:{{ ansible_host }}"
+          -subj "/CN={{ hostvars['localhost'].rancher_hostname }}" \
+          -addext "subjectAltName=DNS:{{ hostvars['localhost'].rancher_hostname }},IP:{{ ansible_host }}"
       args:
         creates: /tmp/rancher-certs/tls.crt
 
@@ -142,8 +144,8 @@
         helm upgrade --install rancher rancher-latest/rancher \
           --namespace cattle-system \
           --create-namespace \
-          --set hostname={{ rancher_hostname }} \
-          --set bootstrapPassword={{ bootstrap_password }} \
+          --set hostname={{ hostvars['localhost'].rancher_hostname }} \
+          --set bootstrapPassword={{ hostvars['localhost'].bootstrap_password }} \
           --set ingress.tls.source=secret \
           --set replicaCount=2
       environment:
@@ -167,6 +169,6 @@
       ansible.builtin.debug:
         msg: |
           Rancher successfully deployed!
-          URL: https://{{ rancher_hostname }}
-          Bootstrap Password: {{ bootstrap_password }}
-          Add to hosts file: {{ hostvars[primary_master].ansible_host }} {{ rancher_hostname }}
+          URL: https://{{ hostvars['localhost'].rancher_hostname }}
+          Bootstrap Password: {{ hostvars['localhost'].bootstrap_password }}
+          Add to hosts file: {{ hostvars[groups['masters'][0]].ansible_host }} {{ hostvars['localhost'].rancher_hostname }}
