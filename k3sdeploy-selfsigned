@@ -8,7 +8,7 @@
     - name: Set facts for cluster
       set_fact:
         primary_master: "{{ groups['masters'][0] }}"
-        rancher_hostname: "rancher.{{ hostvars[groups['masters'][0]].ansible_host }}.lan"
+        rancher_hostname: "rancher.{{ hostvars[groups['masters'][0]].ansible_host }}.home.61amps.com"
         bootstrap_password: "SecurePassword123!"
         cluster_token: "{{ hostvars[groups['masters'][0]].k3s_token | default('') }}"
 
