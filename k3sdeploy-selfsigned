@@ -92,10 +92,17 @@
       register: join_worker
       changed_when: "'already installed' not in join_worker.stdout"
 
+
 - name: Deploy Rancher with self-signed certs
   hosts: "{{ groups['masters'][0] }}"
   become: yes
   tasks:
+    - name: Add Helm repository
+      ansible.builtin.shell: |
+        curl https://baltocdn.com/helm/signing.asc | sudo apt-key add -
+        echo "deb https://baltocdn.com/helm/stable/debian/ all main" | sudo tee /etc/apt/sources.list.d/helm-stable-debian.list
+        apt-get update
+
     - name: Install required packages
       ansible.builtin.apt:
         name: 
