@@ -40,10 +40,8 @@
           --disable traefik \
           --tls-san {{ hostvars['localhost'].rancher_hostname }} \
           --tls-san {{ ansible_host }}
-      async: 300
-      poll: 0
       register: k3s_install
-      changed_when: "'already installed' not in k3s_install.stdout"
+      changed_when: k3s_install.rc == 0
 
     - name: Wait for cluster initialization
       when: is_primary
