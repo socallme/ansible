@@ -53,7 +53,6 @@
       when: is_primary
       ansible.builtin.slurp:
         src: /var/lib/rancher/k3s/server/node-token
-        mode: '0400'
       register: token_file
 
     - name: Set cluster token fact
