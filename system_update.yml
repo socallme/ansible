@@ -1,24 +1,24 @@
 ---
-- name: Update and upgrade system packages
+- name: Update and upgrade all systems
   hosts: all
-  become: yes
-  gather_facts: yes
+  become: yes  # Privilege escalation required
+  gather_facts: yes  # Needed to detect OS distribution and version
 
   tasks:
-    # Debug: Log key facts to understand the environment
+    # Debug to confirm detection
     - name: Debug system facts
       ansible.builtin.debug:
-        msg: 
+        msg:
           - "Distribution: {{ ansible_distribution }}"
+          - "Version: {{ ansible_distribution_version }}"
           - "OS Family: {{ ansible_os_family }}"
           - "Package Manager: {{ ansible_pkg_mgr }}"
-          - "Python: {{ ansible_python_interpreter }}"
 
     # Debian/Ubuntu: Update and upgrade with apt
     - name: Update apt package cache (Debian/Ubuntu)
       ansible.builtin.apt:
         update_cache: yes
-        cache_valid_time: 3600
+        cache_valid_time: 3600  # Cache valid for 1 hour
       when: ansible_os_family == "Debian"
 
     - name: Upgrade all apt packages (Debian/Ubuntu)
@@ -28,18 +28,24 @@
         autoclean: yes
       when: ansible_os_family == "Debian"
 
-    # Fedora/RHEL with dnf: Update with dnf
-    - name: Update dnf packages (Fedora/RHEL with dnf)
+    - name: Clean up apt packages (Debian/Ubuntu)
+      ansible.builtin.apt:
+        autoremove: yes
+        purge: yes
+      when: ansible_os_family == "Debian"
+
+    # Fedora/RHEL/CentOS with dnf: Update with dnf
+    - name: Update dnf packages (Fedora/RHEL/CentOS with dnf)
       ansible.builtin.dnf:
         name: '*'
         state: latest
         update_cache: yes
-        use_backend: dnf4  # Explicitly use dnf4
+        use_backend: dnf4  # Explicitly use dnf4 to avoid backend detection issues
       when: >
         ansible_distribution in ["Fedora", "RedHat", "CentOS"] and
-        "dnf" in ansible_facts.packages  # Check if dnf is installed
+        "dnf" in ansible_facts.packages  # Only run if dnf is installed
 
-    - name: Clean up dnf packages (Fedora/RHEL with dnf)
+    - name: Clean up dnf packages (Fedora/RHEL/CentOS with dnf)
       ansible.builtin.dnf:
         autoremove: yes
         use_backend: dnf4
@@ -64,7 +70,7 @@
         ansible_distribution == "Amazon" or
         (ansible_distribution in ["CentOS", "RedHat"] and ansible_pkg_mgr == "yum")
 
-    # Check for reboot requirement
+    # Check for reboot requirement (multi-distro)
     - name: Check if reboot is required (Debian/Ubuntu)
       ansible.builtin.stat:
         path: /var/run/reboot-required
@@ -75,15 +81,15 @@
     - name: Check if reboot is required (RedHat family, including Amazon Linux)
       ansible.builtin.command: needs-restarting -r
       register: reboot_required_rhel
-      failed_when: false
+      failed_when: false  # Exit code 1 means reboot needed, not a failure
       changed_when: false
-      when: ansible_os_family == "RedHat"
+      when: ansible_os_family == "RedHat"  # Covers Amazon Linux, CentOS, RHEL
 
     # Reboot if required
     - name: Reboot system if required
       ansible.builtin.reboot:
         msg: "Rebooting after system updates"
-        reboot_timeout: 300
+        reboot_timeout: 300  # 5 minutes
       when: >
         (ansible_os_family == "Debian" and reboot_required_debian.stat.exists) or
         (ansible_os_family == "RedHat" and reboot_required_rhel.rc == 1)
