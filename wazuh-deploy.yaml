@@ -1,13 +1,13 @@
 ---
 - name: Deploy Wazuh Agent on Debian-based systems
   hosts: all
-  become: yes  # Required for package installation and service management
-  gather_facts: yes  # Needed to detect OS family
+  become: yes
+  gather_facts: yes
 
   vars:
     wazuh_agent_url: "https://packages.wazuh.com/4.x/apt/pool/main/w/wazuh-agent/wazuh-agent_4.11.0-1_amd64.deb"
     wazuh_agent_package: "wazuh-agent_4.11.0-1_amd64.deb"
-    wazuh_manager: "192.168.20.82"
+    wazuh_manager: "192.168.20.82"  # Use IP instead of hostname
 
   tasks:
     # Debug to confirm OS detection
@@ -25,17 +25,36 @@
         msg: "This playbook is designed for Debian-based systems only."
       when: ansible_os_family != "Debian"
 
-    # Update apt cache and install dependencies
-    - name: Update apt cache and install dependencies
+    # Update apt cache and install basic dependencies
+    - name: Update apt cache and install basic dependencies
       ansible.builtin.apt:
         update_cache: yes
-        cache_valid_time: 3600  # Cache valid for 1 hour
+        cache_valid_time: 3600
         name: "{{ item }}"
         state: present
       loop:
-        - lsb-release  # Required by wazuh-agent
-        - libc6        # Common dependency, just in case
+        - lsb-release
+        - libc6
 
+    # Add Ubuntu Focal repo for libssl1.1 on newer systems (e.g., Ubuntu 22.04)
+    - name: Add Ubuntu Focal repository for libssl1.1 (if needed)
+      ansible.builtin.apt_repository:
+        repo: "deb http://security.ubuntu.com/ubuntu focal-security main"
+        state: present
+        update_cache: yes
+      when: >
+        ansible_distribution == "Ubuntu" and
+        ansible_distribution_version is version('22.04', '>=')
+
+    # Install libssl1.1 on newer Ubuntu versions
+    - name: Install libssl1.1 on newer Ubuntu versions
+      ansible.builtin.apt:
+        name: libssl1.1
+        state: present
+      when: >
+        ansible_distribution == "Ubuntu" and
+        ansible_distribution_version is version('22.04', '>=')
+      ignore_errors: yes
 
     # Download the Wazuh agent package
     - name: Download Wazuh agent .deb package
@@ -48,7 +67,7 @@
       delay: 5
       until: download_result is success
 
-    # Install the Wazuh agent using apt to handle dependencies
+    # Install the Wazuh agent using apt
     - name: Install Wazuh agent package with apt
       ansible.builtin.apt:
         deb: "/tmp/{{ wazuh_agent_package }}"
@@ -56,6 +75,16 @@
         WAZUH_MANAGER: "{{ wazuh_manager }}"
       register: install_result
       changed_when: install_result is changed
+
+    # Ensure ossec.conf has the correct manager IP
+    - name: Configure Wazuh agent to use manager IP
+      ansible.builtin.lineinfile:
+        path: /var/ossec/etc/ossec.conf
+        regexp: '^(\s*)<address>.*</address>'
+        line: "      <address>{{ wazuh_manager }}</address>"
+        insertafter: '<server>'
+        backrefs: yes
+      notify: Restart Wazuh agent
 
     # Clean up downloaded package
     - name: Remove downloaded .deb file
@@ -75,7 +104,7 @@
         name: wazuh-agent
         enabled: yes
 
-    # Start Wazuh agent service
+    # Start Wazuh agent service (initial start)
     - name: Start Wazuh agent service
       ansible.builtin.systemd:
         name: wazuh-agent
@@ -91,3 +120,10 @@
     - name: Debug Wazuh agent status
       ansible.builtin.debug:
         msg: "{{ agent_status.stdout_lines }}"
+
+  handlers:
+    # Restart Wazuh agent if config changes
+    - name: Restart Wazuh agent
+      ansible.builtin.systemd:
+        name: wazuh-agent
+        state: restarted
