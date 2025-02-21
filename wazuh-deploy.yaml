@@ -25,6 +25,18 @@
         msg: "This playbook is designed for Debian-based systems only."
       when: ansible_os_family != "Debian"
 
+    # Update apt cache and install dependencies
+    - name: Update apt cache and install dependencies
+      ansible.builtin.apt:
+        update_cache: yes
+        cache_valid_time: 3600  # Cache valid for 1 hour
+        name: "{{ item }}"
+        state: present
+      loop:
+        - lsb-release  # Required by wazuh-agent
+        - libc6        # Common dependency, just in case
+        - libssl1.1    # Common dependency for security packages
+
     # Download the Wazuh agent package
     - name: Download Wazuh agent .deb package
       ansible.builtin.get_url:
@@ -36,15 +48,14 @@
       delay: 5
       until: download_result is success
 
-    # Install the Wazuh agent with WAZUH_MANAGER environment variable
-    - name: Install Wazuh agent package
-      ansible.builtin.command:
-        cmd: "dpkg -i /tmp/{{ wazuh_agent_package }}"
-        creates: "/var/ossec/bin/wazuh-control"  # Avoid re-running if already installed
+    # Install the Wazuh agent using apt to handle dependencies
+    - name: Install Wazuh agent package with apt
+      ansible.builtin.apt:
+        deb: "/tmp/{{ wazuh_agent_package }}"
       environment:
         WAZUH_MANAGER: "{{ wazuh_manager }}"
       register: install_result
-      changed_when: install_result.rc == 0
+      changed_when: install_result is changed
 
     # Clean up downloaded package
     - name: Remove downloaded .deb file
@@ -67,7 +78,7 @@
     # Start Wazuh agent service
     - name: Start Wazuh agent service
       ansible.builtin.systemd:
-        name: Wazuh-agent
+        name: wazuh-agent
         state: started
 
     # Verify Wazuh agent status
