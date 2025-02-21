@@ -7,7 +7,7 @@
   vars:
     wazuh_agent_url: "https://packages.wazuh.com/4.x/apt/pool/main/w/wazuh-agent/wazuh-agent_4.11.0-1_amd64.deb"
     wazuh_agent_package: "wazuh-agent_4.11.0-1_amd64.deb"
-    wazuh_manager: "wazuh.home.61amps.com"
+    wazuh_manager: "192.168.20.82"
 
   tasks:
     # Debug to confirm OS detection
