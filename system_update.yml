@@ -1,43 +1,63 @@
 ---
 - name: Update and upgrade system packages
-  hosts: all  # Replace with your target group or 'all' for all hosts
-  become: yes  # Privilege escalation required for package management
-  gather_facts: yes  # Required to determine OS distribution
+  hosts: all
+  become: yes
+  gather_facts: yes
+
+  pre_tasks:
+    # Force package manager detection if gather_facts misses it
+    - name: Detect package manager (workaround for unknown pkg_mgr)
+      ansible.builtin.command: "which {{ item }}"
+      register: pkg_mgr_check
+      changed_when: false
+      failed_when: false
+      loop:
+        - apt-get
+        - dnf
+        - yum
+      when: ansible_pkg_mgr == "unknown"
+
+    - name: Set package manager fact
+      ansible.builtin.set_fact:
+        ansible_pkg_mgr: "{{ item.item }}"
+      when: 
+        - ansible_pkg_mgr == "unknown"
+        - pkg_mgr_check.results is defined
+        - item.rc == 0
+      loop: "{{ pkg_mgr_check.results | default([]) }}"
 
   tasks:
     # Debian/Ubuntu: Update and upgrade with apt
     - name: Update apt package cache (Debian/Ubuntu)
       ansible.builtin.apt:
         update_cache: yes
-        cache_valid_time: 3600  # Cache valid for 1 hour to reduce redundant updates
-      when: ansible_os_family == "Debian"  # Use os_family for broader compatibility
+        cache_valid_time: 3600
+      when: ansible_os_family == "Debian"
 
     - name: Upgrade all apt packages (Debian/Ubuntu)
       ansible.builtin.apt:
-        upgrade: dist  # Full system upgrade
+        upgrade: dist
         autoremove: yes
         autoclean: yes
       when: ansible_os_family == "Debian"
 
-    # CentOS/RHEL/Fedora: Update with dnf (modern RHEL-based systems)
-    - name: Update dnf packages (Fedora/CentOS/RHEL with dnf)
+    # Fedora/RHEL with dnf: Update with dnf
+    - name: Update dnf packages (Fedora/RHEL with dnf)
       ansible.builtin.dnf:
         name: '*'
         state: latest
         update_cache: yes
+        use_backend: dnf4  # Explicitly use dnf4 to avoid detection issues
       when: >
-        (ansible_distribution == "Fedora" or 
-         ansible_distribution == "CentOS" or 
-         ansible_distribution == "RedHat") and
+        (ansible_distribution in ["Fedora", "RedHat", "CentOS"]) and
         ansible_pkg_mgr == "dnf"
 
-    - name: Clean up dnf packages (Fedora/CentOS/RHEL with dnf)
+    - name: Clean up dnf packages (Fedora/RHEL with dnf)
       ansible.builtin.dnf:
         autoremove: yes
+        use_backend: dnf4
       when: >
-        (ansible_distribution == "Fedora" or 
-         ansible_distribution == "CentOS" or 
-         ansible_distribution == "RedHat") and
+        (ansible_distribution in ["Fedora", "RedHat", "CentOS"]) and
         ansible_pkg_mgr == "dnf"
 
     # Amazon Linux 2 / Older CentOS/RHEL: Update with yum
@@ -52,31 +72,31 @@
 
     - name: Clean up yum packages (Amazon Linux 2, older CentOS/RHEL)
       ansible.builtin.yum:
-        clean_requirements_on_remove: yes  # Similar to autoremove
+        clean_requirements_on_remove: yes
       when: >
         ansible_distribution == "Amazon" or
         (ansible_distribution in ["CentOS", "RedHat"] and ansible_pkg_mgr == "yum")
 
-    # Optional: Check for reboot requirement (multi-distro)
+    # Check for reboot requirement
     - name: Check if reboot is required (Debian/Ubuntu)
       ansible.builtin.stat:
         path: /var/run/reboot-required
       register: reboot_required_debian
       when: ansible_os_family == "Debian"
-      ignore_errors: yes  # Avoid playbook failure if file check fails
+      ignore_errors: yes
 
-    - name: Check if reboot is required (RHEL-based, including Amazon Linux)
+    - name: Check if reboot is required (RedHat family, including Amazon Linux)
       ansible.builtin.command: needs-restarting -r
       register: reboot_required_rhel
-      failed_when: false  # Command returns non-zero if reboot needed, not a failure
+      failed_when: false
       changed_when: false
-      when: ansible_os_family == "RedHat"  # Covers Amazon Linux, CentOS, RHEL
+      when: ansible_os_family == "RedHat"
 
     # Reboot if required
     - name: Reboot system if required
       ansible.builtin.reboot:
         msg: "Rebooting after system updates"
-        reboot_timeout: 300  # 5 minutes timeout
+        reboot_timeout: 300
       when: >
         (ansible_os_family == "Debian" and reboot_required_debian.stat.exists) or
         (ansible_os_family == "RedHat" and reboot_required_rhel.rc == 1)
