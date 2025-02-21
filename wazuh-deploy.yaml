@@ -35,7 +35,7 @@
       loop:
         - lsb-release  # Required by wazuh-agent
         - libc6        # Common dependency, just in case
-        - libssl1.1    # Common dependency for security packages
+
 
     # Download the Wazuh agent package
     - name: Download Wazuh agent .deb package
