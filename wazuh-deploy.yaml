@@ -1,0 +1,82 @@
+---
+- name: Deploy Wazuh Agent on Debian-based systems
+  hosts: all
+  become: yes  # Required for package installation and service management
+  gather_facts: yes  # Needed to detect OS family
+
+  vars:
+    wazuh_agent_url: "https://packages.wazuh.com/4.x/apt/pool/main/w/wazuh-agent/wazuh-agent_4.11.0-1_amd64.deb"
+    wazuh_agent_package: "wazuh-agent_4.11.0-1_amd64.deb"
+    wazuh_manager: "wazuh.home.61amps.com"
+
+  tasks:
+    # Debug to confirm OS detection
+    - name: Debug OS facts
+      ansible.builtin.debug:
+        msg:
+          - "Host: {{ inventory_hostname }}"
+          - "Distribution: {{ ansible_distribution }}"
+          - "Version: {{ ansible_distribution_version }}"
+          - "OS Family: {{ ansible_os_family }}"
+
+    # Ensure the system is Debian-based
+    - name: Fail if not Debian-based
+      ansible.builtin.fail:
+        msg: "This playbook is designed for Debian-based systems only."
+      when: ansible_os_family != "Debian"
+
+    # Download the Wazuh agent package
+    - name: Download Wazuh agent .deb package
+      ansible.builtin.get_url:
+        url: "{{ wazuh_agent_url }}"
+        dest: "/tmp/{{ wazuh_agent_package }}"
+        mode: "0644"
+      register: download_result
+      retries: 3
+      delay: 5
+      until: download_result is success
+
+    # Install the Wazuh agent with WAZUH_MANAGER environment variable
+    - name: Install Wazuh agent package
+      ansible.builtin.command:
+        cmd: "dpkg -i /tmp/{{ wazuh_agent_package }}"
+        creates: "/var/ossec/bin/wazuh-control"  # Avoid re-running if already installed
+      environment:
+        WAZUH_MANAGER: "{{ wazuh_manager }}"
+      register: install_result
+      changed_when: install_result.rc == 0
+
+    # Clean up downloaded package
+    - name: Remove downloaded .deb file
+      ansible.builtin.file:
+        path: "/tmp/{{ wazuh_agent_package }}"
+        state: absent
+      when: install_result is changed
+
+    # Reload systemd daemon
+    - name: Reload systemd daemon
+      ansible.builtin.systemd:
+        daemon_reload: yes
+
+    # Enable Wazuh agent service
+    - name: Enable Wazuh agent service
+      ansible.builtin.systemd:
+        name: wazuh-agent
+        enabled: yes
+
+    # Start Wazuh agent service
+    - name: Start Wazuh agent service
+      ansible.builtin.systemd:
+        name: Wazuh-agent
+        state: started
+
+    # Verify Wazuh agent status
+    - name: Check Wazuh agent status
+      ansible.builtin.command: systemctl status wazuh-agent
+      register: agent_status
+      changed_when: false
+      failed_when: agent_status.rc != 0
+
+    - name: Debug Wazuh agent status
+      ansible.builtin.debug:
+        msg: "{{ agent_status.stdout_lines }}"

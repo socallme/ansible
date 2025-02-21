@@ -1,22 +1,11 @@
 ---
-- name: Update and upgrade all systems
+- name: Update and upgrade system packages
   hosts: all
   become: yes
   gather_facts: yes
 
   tasks:
-    # Debug to confirm detection
-    - name: Debug system facts
-      ansible.builtin.debug:
-        msg:
-          - "Host: {{ inventory_hostname }}"
-          - "Distribution: {{ ansible_distribution }}"
-          - "Version: {{ ansible_distribution_version }}"
-          - "OS Family: {{ ansible_os_family }}"
-          - "Package Manager: {{ ansible_pkg_mgr }}"
-          - "Packages: {{ ansible_facts.packages | default({}) | dict2items | selectattr('key', 'in', ['dnf', 'yum']) | list }}"
-
-    # Debian/Ubuntu: Update and upgrade with apt
+    # Debian/Ubuntu systems
     - name: Update apt package cache (Debian/Ubuntu)
       ansible.builtin.apt:
         update_cache: yes
@@ -30,55 +19,18 @@
         autoclean: yes
       when: ansible_os_family == "Debian"
 
-    - name: Clean up apt packages (Debian/Ubuntu)
-      ansible.builtin.apt:
-        autoremove: yes
-        purge: yes
-      when: ansible_os_family == "Debian"
-
-    # Fedora/RHEL/CentOS with dnf: Update with dnf
-    - name: Update dnf packages (Fedora/RHEL/CentOS with dnf)
-      ansible.builtin.dnf:
-        name: '*'
-        state: latest
-        update_cache: yes
-        use_backend: dnf4
-      when: >
-        ansible_distribution in ["Fedora", "RedHat", "CentOS"] and
-        "dnf" in ansible_facts.packages and
-        inventory_hostname != "wazuh-server" and
-        ansible_host != "192.168.20.82"  # Explicitly exclude Amazon Linux 2 host
-
-    - name: Clean up dnf packages (Fedora/RHEL/CentOS with dnf)
-      ansible.builtin.dnf:
-        autoremove: yes
-        use_backend: dnf4
-      when: >
-        ansible_distribution in ["Fedora", "RedHat", "CentOS"] and
-        "dnf" in ansible_facts.packages and
-        inventory_hostname != "wazuh-server" and
-        ansible_host != "192.168.20.82"
-
-    # Amazon Linux 2 / Older RHEL: Update with yum
-    - name: Update yum packages (Amazon Linux 2, older RHEL)
+    # RHEL family (CentOS, RHEL) and Amazon Linux 2
+    - name: Update all yum packages
       ansible.builtin.yum:
         name: '*'
         state: latest
         update_cache: yes
-      when: >
-        ansible_distribution == "Amazon" or
-        inventory_hostname == "wazuh-server" or
-        ansible_host == "192.168.20.82" or
-        (ansible_distribution in ["CentOS", "RedHat"] and "yum" in ansible_facts.packages)
+      when: ansible_pkg_mgr == "yum" or ansible_os_family == "RedHat"
 
-    - name: Clean up yum packages (Amazon Linux 2, older RHEL)
+    - name: Clean up yum packages
       ansible.builtin.yum:
         clean_requirements_on_remove: yes
-      when: >
-        ansible_distribution == "Amazon" or
-        inventory_hostname == "wazuh-server" or
-        ansible_host == "192.168.20.82" or
-        (ansible_distribution in ["CentOS", "RedHat"] and "yum" in ansible_facts.packages)
+      when: ansible_pkg_mgr == "yum" or ansible_os_family == "RedHat"
 
     # Check for reboot requirement
     - name: Check if reboot is required (Debian/Ubuntu)
@@ -86,9 +38,8 @@
         path: /var/run/reboot-required
       register: reboot_required_debian
       when: ansible_os_family == "Debian"
-      ignore_errors: yes
 
-    - name: Check if reboot is required (RedHat family)
+    - name: Check if reboot is required (RedHat family and Amazon Linux)
       ansible.builtin.command: needs-restarting -r
       register: reboot_required_rhel
       failed_when: false
@@ -100,6 +51,7 @@
       ansible.builtin.reboot:
         msg: "Rebooting after system updates"
         reboot_timeout: 300
+        post_reboot_delay: 60
       when: >
         (ansible_os_family == "Debian" and reboot_required_debian.stat.exists) or
         (ansible_os_family == "RedHat" and reboot_required_rhel.rc == 1)
