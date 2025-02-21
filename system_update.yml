@@ -4,29 +4,16 @@
   become: yes
   gather_facts: yes
 
-  pre_tasks:
-    # Force package manager detection if gather_facts misses it
-    - name: Detect package manager (workaround for unknown pkg_mgr)
-      ansible.builtin.command: "which {{ item }}"
-      register: pkg_mgr_check
-      changed_when: false
-      failed_when: false
-      loop:
-        - apt-get
-        - dnf
-        - yum
-      when: ansible_pkg_mgr == "unknown"
-
-    - name: Set package manager fact
-      ansible.builtin.set_fact:
-        ansible_pkg_mgr: "{{ item.item }}"
-      when: 
-        - ansible_pkg_mgr == "unknown"
-        - pkg_mgr_check.results is defined
-        - item.rc == 0
-      loop: "{{ pkg_mgr_check.results | default([]) }}"
-
   tasks:
+    # Debug: Log key facts to understand the environment
+    - name: Debug system facts
+      ansible.builtin.debug:
+        msg: 
+          - "Distribution: {{ ansible_distribution }}"
+          - "OS Family: {{ ansible_os_family }}"
+          - "Package Manager: {{ ansible_pkg_mgr }}"
+          - "Python: {{ ansible_python_interpreter }}"
+
     # Debian/Ubuntu: Update and upgrade with apt
     - name: Update apt package cache (Debian/Ubuntu)
       ansible.builtin.apt:
@@ -47,21 +34,21 @@
         name: '*'
         state: latest
         update_cache: yes
-        use_backend: dnf4  # Explicitly use dnf4 to avoid detection issues
+        use_backend: dnf4  # Explicitly use dnf4
       when: >
-        (ansible_distribution in ["Fedora", "RedHat", "CentOS"]) and
-        ansible_pkg_mgr == "dnf"
+        ansible_distribution in ["Fedora", "RedHat", "CentOS"] and
+        "dnf" in ansible_facts.packages  # Check if dnf is installed
 
     - name: Clean up dnf packages (Fedora/RHEL with dnf)
       ansible.builtin.dnf:
         autoremove: yes
         use_backend: dnf4
       when: >
-        (ansible_distribution in ["Fedora", "RedHat", "CentOS"]) and
-        ansible_pkg_mgr == "dnf"
+        ansible_distribution in ["Fedora", "RedHat", "CentOS"] and
+        "dnf" in ansible_facts.packages
 
-    # Amazon Linux 2 / Older CentOS/RHEL: Update with yum
-    - name: Update yum packages (Amazon Linux 2, older CentOS/RHEL)
+    # Amazon Linux 2 / Older RHEL: Update with yum
+    - name: Update yum packages (Amazon Linux 2, older RHEL)
       ansible.builtin.yum:
         name: '*'
         state: latest
@@ -70,7 +57,7 @@
         ansible_distribution == "Amazon" or
         (ansible_distribution in ["CentOS", "RedHat"] and ansible_pkg_mgr == "yum")
 
-    - name: Clean up yum packages (Amazon Linux 2, older CentOS/RHEL)
+    - name: Clean up yum packages (Amazon Linux 2, older RHEL)
       ansible.builtin.yum:
         clean_requirements_on_remove: yes
       when: >
