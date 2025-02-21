@@ -4,30 +4,8 @@
   become: yes
   gather_facts: yes
 
-  pre_tasks:
-    # Force package manager detection if gather_facts misses it
-    - name: Detect package manager (workaround for unknown pkg_mgr)
-      ansible.builtin.command: "which {{ item }}"
-      register: pkg_mgr_check
-      changed_when: false
-      failed_when: false
-      loop:
-        - apt-get
-        - dnf
-        - yum
-      when: ansible_pkg_mgr == "unknown"
-
-    - name: Set package manager fact
-      ansible.builtin.set_fact:
-        ansible_pkg_mgr: "{{ item.item }}"
-      when: 
-        - ansible_pkg_mgr == "unknown"
-        - pkg_mgr_check.results is defined
-        - item.rc == 0
-      loop: "{{ pkg_mgr_check.results | default([]) }}"
-
   tasks:
-    # Debian/Ubuntu: Update and upgrade with apt
+    # Debian/Ubuntu systems
     - name: Update apt package cache (Debian/Ubuntu)
       ansible.builtin.apt:
         update_cache: yes
@@ -41,41 +19,18 @@
         autoclean: yes
       when: ansible_os_family == "Debian"
 
-    # Fedora/RHEL with dnf: Update with dnf
-    - name: Update dnf packages (Fedora/RHEL with dnf)
-      ansible.builtin.dnf:
-        name: '*'
-        state: latest
-        update_cache: yes
-        use_backend: dnf4  # Explicitly use dnf4 to avoid detection issues
-      when: >
-        (ansible_distribution in ["Fedora", "RedHat", "CentOS"]) and
-        ansible_pkg_mgr == "dnf"
-
-    - name: Clean up dnf packages (Fedora/RHEL with dnf)
-      ansible.builtin.dnf:
-        autoremove: yes
-        use_backend: dnf4
-      when: >
-        (ansible_distribution in ["Fedora", "RedHat", "CentOS"]) and
-        ansible_pkg_mgr == "dnf"
-
-    # Amazon Linux 2 / Older CentOS/RHEL: Update with yum
-    - name: Update yum packages (Amazon Linux 2, older CentOS/RHEL)
+    # RHEL family (CentOS, RHEL) and Amazon Linux 2
+    - name: Update all yum packages
       ansible.builtin.yum:
         name: '*'
         state: latest
         update_cache: yes
-      when: >
-        ansible_distribution == "Amazon" or
-        (ansible_distribution in ["CentOS", "RedHat"] and ansible_pkg_mgr == "yum")
+      when: ansible_pkg_mgr == "yum" or ansible_os_family == "RedHat"
 
-    - name: Clean up yum packages (Amazon Linux 2, older CentOS/RHEL)
+    - name: Clean up yum packages
       ansible.builtin.yum:
         clean_requirements_on_remove: yes
-      when: >
-        ansible_distribution == "Amazon" or
-        (ansible_distribution in ["CentOS", "RedHat"] and ansible_pkg_mgr == "yum")
+      when: ansible_pkg_mgr == "yum" or ansible_os_family == "RedHat"
 
     # Check for reboot requirement
     - name: Check if reboot is required (Debian/Ubuntu)
@@ -83,9 +38,8 @@
         path: /var/run/reboot-required
       register: reboot_required_debian
       when: ansible_os_family == "Debian"
-      ignore_errors: yes
 
-    - name: Check if reboot is required (RedHat family, including Amazon Linux)
+    - name: Check if reboot is required (RedHat family and Amazon Linux)
       ansible.builtin.command: needs-restarting -r
       register: reboot_required_rhel
       failed_when: false
@@ -97,6 +51,7 @@
       ansible.builtin.reboot:
         msg: "Rebooting after system updates"
         reboot_timeout: 300
+        post_reboot_delay: 60
       when: >
         (ansible_os_family == "Debian" and reboot_required_debian.stat.exists) or
         (ansible_os_family == "RedHat" and reboot_required_rhel.rc == 1)
